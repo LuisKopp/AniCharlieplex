@@ -1,5 +1,9 @@
 //--------------------------------------------------------------------------
-// Animated flame for Adafruit Pro Trinket.  Uses the following parts:
+// Animated flame using the IS31FL3731 and a Charlieplex 9x16 LED matrix
+//
+// Particle and ESP32 support by Martin Falatic <martin@falatic.com>
+//
+// For the Adafruit Pro Trinket, this uses the following parts:
 //   - Pro Trinket microcontroller (adafruit.com/product/2010 or 2000)
 //     (#2010 = 3V/12MHz for longest battery life, but 5V/16MHz works OK)
 //   - Charlieplex LED Matrix Driver (2946)
@@ -16,15 +20,33 @@
 //--------------------------------------------------------------------------
 
 #include <Wire.h>           // For I2C communication
-#include "data.h"           // Flame animation data
+#include "data_normal.h"           // Flame animation data
+
+#ifdef __AVR_ATtiny85__     // Trinket, etc.
 #include <avr/power.h>      // Peripheral control and
 #include <avr/sleep.h>      // sleep to minimize current draw
+#endif
 
 #define I2C_ADDR 0x74       // I2C address of Charlieplex matrix
 
 uint8_t        page = 0;    // Front/back buffer control
 const uint8_t *ptr  = anim; // Current pointer into animation data
 uint8_t        img[9 * 16]; // Buffer for rendering image
+
+#if   defined SPARK_PLATFORM
+#define I2C_BUFFER_DEPTH  32
+#elif defined ESP32
+#define I2C_BUFFER_DEPTH  16
+#elif defined Arduino
+#define I2C_BUFFER_DEPTH  32
+#endif
+
+// PLATFORM SETTINGS -------------------------------------------------------
+
+#ifdef SPARK_PLATFORM
+SYSTEM_THREAD(ENABLED);
+SYSTEM_MODE(AUTOMATIC);
+#endif
 
 // UTILITY FUNCTIONS -------------------------------------------------------
 
@@ -52,17 +74,30 @@ void pageSelect(uint8_t n) {
 void setup() {
   uint8_t i, p, byteCounter;
 
+#ifdef __AVR_ATtiny85__     // Trinket, etc.
   power_all_disable(); // Stop peripherals: ADC, timers, etc. to save power
   power_twi_enable();  // But switch I2C back on; need it for display
   DIDR0 = 0x0F;        // Digital input disable on A0-A3
+#endif
 
   // The Arduino Wire library runs I2C at 100 KHz by default.
   // IS31FL3731 can run at 400 KHz.  To ensure fast animation,
   // override the I2C speed settings after init...
   Wire.begin();                            // Initialize I2C
+
+#if   defined SPARK_PLATFORM
+  Wire.setSpeed(400000);
+#elif defined ESP32
+  Wire.setClock(400000); 
+#elif defined Arduino
+  Wire.setSpeed(400000);
+#endif
+
+#ifdef __AVR_ATtiny85__     // Trinket, etc.
   TWSR = 0;                                // I2C prescaler = 1
   TWBR = (F_CPU / 400000 - 16) / 2;        // 400 KHz I2C
   // The TWSR/TWBR lines are AVR-specific and won't work on other MCUs.
+#endif
 
   pageSelect(0x0B);                        // Access the Function Registers
   writeRegister(0);                        // Starting from first...
@@ -74,7 +109,7 @@ void setup() {
     for(i=0; i<18; i++) Wire.write(0xFF);  // Enable all LEDs (18*8=144)
     for(byteCounter = i+1; i<0xB4; i++) {  // For blink & PWM registers...
       Wire.write(0);                       // Clear all
-      if(++byteCounter >= 32) {            // Every 32 bytes...
+      if(++byteCounter >= I2C_BUFFER_DEPTH) { // If buffer is maxed...
         byteCounter = 1;                   // End I2C transmission and
         Wire.endTransmission();            // start a new one because
         writeRegister(i);                  // Wire buf is only 32 bytes.
@@ -83,6 +118,7 @@ void setup() {
     Wire.endTransmission();
   }
 
+#ifdef __AVR_ATtiny85__     // Trinket, etc.
   // Enable the watchdog timer, set to a ~32 ms interval (about 31 Hz)
   // This provides a sufficiently steady time reference for animation,
   // allows timer/counter peripherals to remain off (for power saving)
@@ -95,6 +131,7 @@ void setup() {
   interrupts();
   // Peripheral and sleep savings only amount to about 10 mA, but this
   // may provide nearly an extra hour of run time before battery depletes.
+#endif
 }
 
 // LOOP FUNCTION - RUNS EVERY FRAME ----------------------------------------
@@ -102,9 +139,11 @@ void setup() {
 void loop() {
   uint8_t  a, x1, y1, x2, y2, x, y;
 
+#ifdef __AVR_ATtiny85__     // Trinket, etc.
   power_twi_enable();
   // Datasheet recommends that I2C should be re-initialized after enable,
   // but Wire.begin() is slow.  Seems to work OK without.
+#endif
 
   // Display frame rendered on prior pass.  This is done at function start
   // (rather than after rendering) to ensire more uniform animation timing.
@@ -139,7 +178,7 @@ void loop() {
   for(uint8_t x=0; x<9; x++) {
     for(uint8_t y=0; y<16; y++) {
       Wire.write(img[i++]);      // Write each byte to matrix
-      if(++byteCounter >= 32) {  // Every 32 bytes...
+      if(++byteCounter >= I2C_BUFFER_DEPTH) { // If buffer is maxed...
         Wire.endTransmission();  // end transmission and
         writeRegister(0x24 + i); // start a new one (Wire lib limits)
       }
@@ -147,12 +186,18 @@ void loop() {
   }
   Wire.endTransmission();
 
+#ifdef __AVR_ATtiny85__     // Trinket, etc.
   power_twi_disable(); // I2C off (see comment at top of function)
   sleep_enable();
   interrupts();
   sleep_mode();        // Power-down MCU.
   // Code will resume here on wake; loop() returns and is called again
+#else
+  delay(30);
+#endif
 }
 
+#ifdef __AVR_ATtiny85__     // Trinket, etc.
 ISR(WDT_vect) { } // Watchdog timer interrupt (does nothing, but required)
+#endif
 
